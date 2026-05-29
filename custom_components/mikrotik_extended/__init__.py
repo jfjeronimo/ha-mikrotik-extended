@@ -58,11 +58,11 @@ class _RingBufferHandler(logging.Handler):
 
 
 _log_handler = _RingBufferHandler(_LOG_BUFFER)
-_log_handler.setLevel(logging.DEBUG)
+_log_handler.setLevel(logging.ERROR)
 _log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
 _integration_logger = logging.getLogger("custom_components.mikrotik_extended")
 _integration_logger.addHandler(_log_handler)
-_integration_logger.setLevel(logging.DEBUG)
+_integration_logger.setLevel(logging.ERROR)
 
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
