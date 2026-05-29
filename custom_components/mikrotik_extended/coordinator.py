@@ -2167,8 +2167,13 @@ class MikrotikCoordinator(DataUpdateCoordinator[None]):
             data=self.ds["arp"],
             source=self.api.query("/ip/arp"),
             key="mac-address",
-            vals=[{"name": "mac-address"}, {"name": "address"}, {"name": "interface"}],
+            vals=[{"name": "mac-address"}, {"name": "address"}, {"name": "interface"}, {"name": "status", "default": "unknown"}],
             ensure_vals=[{"name": "bridge", "default": ""}],
+            skip=[
+                {"name": "invalid", "value": True},
+                {"name": "complete", "value": False},
+                {"name": "status", "value": "failed"}
+            ],
         )
 
         for uid, vals in self.ds["arp"].items():
@@ -2599,22 +2604,33 @@ class MikrotikCoordinator(DataUpdateCoordinator[None]):
                     self.ds["host"][uid][key] = default
 
         # Mark wired hosts available if present in ARP table
+        # Mark wired hosts available based on real status
         for uid, vals in self.ds["host"].items():
-            if vals.get("source") not in ["capsman", "wireless", "restored"]:
-                is_bound = uid in self.ds["dhcp"] and self.ds["dhcp"][uid].get("status") == "bound"
-                
-                # Si el host_tracker está activo (hace arp_ping), confiamos en su resultado (self.ds["host"][uid]["available"]).
-                # Solo lo forzamos a True si el DHCP nos dice explícitamente que está 'bound' (activo ahora mismo).
-                if self.option_track_network_hosts:
-                    if is_bound and not self.ds["host"][uid].get("available"):
-                        self.ds["host"][uid]["available"] = True
-                        self.ds["host"][uid]["last-seen"] = utcnow()
-                # Si el tracker de pings está desactivado, hacemos fallback a mirar si existe en ARP o está bound
+            if vals.get("source") in ["capsman", "wireless", "restored"]:
+                continue
+
+            # 1. Obtenemos datos del ARP si existen
+            arp_entry = self.ds["arp"].get(uid)
+            is_permanent = arp_entry and arp_entry.get("dynamic") == False
+            
+            # 2. Obtenemos si está bound en DHCP
+            is_bound = uid in self.ds["dhcp"] and self.ds["dhcp"][uid].get("status") == "bound"
+            
+            # 3. Determinamos si el dispositivo responde (arp_ping)
+            is_reachable = vals.get("available", False)
+
+            if is_permanent:
+                # Si es PERMANENTE, solo es 'available' si responde al PING.
+                # Ignoramos si está en la tabla o si el DHCP dice que está bound.
+                self.ds["host"][uid]["available"] = is_reachable
+            else:
+                # Si es DINÁMICO, confiamos en la lógica original:
+                # Si responde al ping O está activo en ARP/DHCP, marcamos como disponible.
+                if is_reachable or is_bound or (arp_entry is not None):
+                    self.ds["host"][uid]["available"] = True
+                    self.ds["host"][uid]["last-seen"] = utcnow()
                 else:
-                    in_arp = uid in self.ds["arp"] and self.ds["arp"][uid].get("address", "unknown") not in ["unknown", ""]
-                    if in_arp or is_bound:
-                        self.ds["host"][uid]["available"] = True
-                        self.ds["host"][uid]["last-seen"] = utcnow()
+                    self.ds["host"][uid]["available"] = False
         # Process hosts
         self.ds["resource"]["clients_wired"] = 0
         self.ds["resource"]["clients_wireless"] = 0
@@ -2700,7 +2716,11 @@ class MikrotikCoordinator(DataUpdateCoordinator[None]):
                     _wireless_clients.append(client_info)
                 else:
                     # Validar estrictamente si es un cliente cableado activo y sin duplicar
-                    is_active_arp = uid in self.ds["arp"] and self.ds["arp"][uid].get("address", "unknown") not in ["unknown", ""]
+                    is_active_arp = (
+                        uid in self.ds["arp"]
+                        and self.ds["arp"][uid].get("address", "unknown") not in ["unknown", ""]
+                        and self.ds["arp"][uid].get("status", "unknown") == "reachable"
+                    )
                     is_bound_dhcp = uid in self.ds["dhcp"] and self.ds["dhcp"][uid].get("status") == "bound"
                     
                     if is_active_arp or is_bound_dhcp:
