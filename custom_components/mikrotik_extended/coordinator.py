@@ -2549,14 +2549,14 @@ class MikrotikCoordinator(DataUpdateCoordinator[None]):
 
         # Add hosts from DHCP
         for uid, vals in self.ds["dhcp"].items():
-            if not vals["enabled"]:
+            # Saltar si no está habilitado o el estado de DHCP no es 'bound' (activo)
+            if not vals["enabled"] or vals.get("status") != "bound":
                 continue
 
             if uid not in self.ds["host"]:
                 self.ds["host"][uid] = {"source": "dhcp"}
             elif self.ds["host"][uid]["source"] != "dhcp":
                 continue
-
             for key in ["address", "mac-address", "interface"]:
                 self.ds["host"][uid][key] = vals[key]
 
@@ -2600,10 +2600,21 @@ class MikrotikCoordinator(DataUpdateCoordinator[None]):
 
         # Mark wired hosts available if present in ARP table
         for uid, vals in self.ds["host"].items():
-            if vals.get("source") not in ["capsman", "wireless", "restored"] and (uid in self.ds["arp"] and self.ds["arp"][uid].get("address", "unknown") not in ["unknown", ""]):
-                self.ds["host"][uid]["available"] = True
-                self.ds["host"][uid]["last-seen"] = utcnow()
-
+            if vals.get("source") not in ["capsman", "wireless", "restored"]:
+                is_bound = uid in self.ds["dhcp"] and self.ds["dhcp"][uid].get("status") == "bound"
+                
+                # Si el host_tracker está activo (hace arp_ping), confiamos en su resultado (self.ds["host"][uid]["available"]).
+                # Solo lo forzamos a True si el DHCP nos dice explícitamente que está 'bound' (activo ahora mismo).
+                if self.option_track_network_hosts:
+                    if is_bound and not self.ds["host"][uid].get("available"):
+                        self.ds["host"][uid]["available"] = True
+                        self.ds["host"][uid]["last-seen"] = utcnow()
+                # Si el tracker de pings está desactivado, hacemos fallback a mirar si existe en ARP o está bound
+                else:
+                    in_arp = uid in self.ds["arp"] and self.ds["arp"][uid].get("address", "unknown") not in ["unknown", ""]
+                    if in_arp or is_bound:
+                        self.ds["host"][uid]["available"] = True
+                        self.ds["host"][uid]["last-seen"] = utcnow()
         # Process hosts
         self.ds["resource"]["clients_wired"] = 0
         self.ds["resource"]["clients_wireless"] = 0
@@ -2688,9 +2699,13 @@ class MikrotikCoordinator(DataUpdateCoordinator[None]):
                     self.ds["resource"]["clients_wireless"] += 1
                     _wireless_clients.append(client_info)
                 else:
-                    self.ds["resource"]["clients_wired"] += 1
-                    _wired_clients.append(client_info)
-
+                    # Validar estrictamente si es un cliente cableado activo y sin duplicar
+                    is_active_arp = uid in self.ds["arp"] and self.ds["arp"][uid].get("address", "unknown") not in ["unknown", ""]
+                    is_bound_dhcp = uid in self.ds["dhcp"] and self.ds["dhcp"][uid].get("status") == "bound"
+                    
+                    if is_active_arp or is_bound_dhcp:
+                        self.ds["resource"]["clients_wired"] += 1
+                        _wired_clients.append(client_info)
         self.ds["resource"]["wired_clients_list"] = _wired_clients
         self.ds["resource"]["wireless_clients_list"] = _wireless_clients
 
